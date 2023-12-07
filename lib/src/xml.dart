@@ -95,8 +95,15 @@ class WebdavXml {
 
             //
             var str = Uri.decodeFull(href);
+            str = isDir ? fixSlash(str) : str;
             var name = path2Name(str);
-            var filePath = path + name + (isDir ? '/' : '');
+
+            var filePath = path + name;
+            filePath = isDir ? fixSlash(filePath) : filePath;
+            if (filePath.length > str.length ||
+                str.substring(str.length - filePath.length) != filePath) {
+              filePath = rtrim(path, "/");
+            }
 
             files.add(File(
               path: filePath,
