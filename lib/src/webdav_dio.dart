@@ -269,6 +269,8 @@ class WdDio with DioMixin implements Dio {
     String savePath, {
     void Function(int count, int total)? onProgress,
     CancelToken? cancelToken,
+    int speed = 0,
+    bool append = false,
   }) async {
     // fix auth error
     var pResp = await this.wdOptions(self, path, cancelToken: cancelToken);
@@ -277,6 +279,12 @@ class WdDio with DioMixin implements Dio {
     }
 
     Response<ResponseBody> resp;
+    File file = File(savePath);
+    int fileSize = 0;
+    if (append && file.existsSync()) {
+      fileSize = file.lengthSync();
+    }
+    print(fileSize);
 
     // Reference Dio download
     // request
@@ -285,7 +293,12 @@ class WdDio with DioMixin implements Dio {
         self,
         'GET',
         path,
-        optionsHandler: (options) => options.responseType = ResponseType.stream,
+        optionsHandler: (options) {
+          options.responseType = ResponseType.stream;
+          if (append) {
+            options.headers!["range"] = "bytes=$fileSize-";
+          }
+        },
         // onReceiveProgress: onProgress,
         cancelToken: cancelToken,
       );
@@ -303,17 +316,20 @@ class WdDio with DioMixin implements Dio {
       }
       rethrow;
     }
-    if (resp.statusCode != 200) {
+    if (resp.statusCode != 200 && resp.statusCode != 206) {
       throw newResponseError(resp);
     }
 
     resp.headers = Headers.fromMap(resp.data!.headers);
 
     //If directory (or file) doesn't exist yet, the entire method fails
-    File file = File(savePath);
-    file.createSync(recursive: true);
 
-    var raf = file.openSync(mode: FileMode.write);
+    if (fileSize <= 0) {
+      file.createSync(recursive: true);
+    }
+
+    var raf =
+        file.openSync(mode: fileSize > 0 ? FileMode.append : FileMode.write);
 
     //Create a Completer to notify the success/error state.
     var completer = Completer<Response>();
@@ -343,39 +359,122 @@ class WdDio with DioMixin implements Dio {
         closed = true;
         await asyncWrite;
         await raf.close();
-        await file.delete();
+        // await file.delete();
       }
     }
 
+    Future<void> _write(List<int> data) async {
+      return raf.writeFrom(data).then((_raf) {
+        // Notify progress
+        received += data.length;
+
+        onProgress?.call(received + fileSize, total);
+
+        raf = _raf;
+        // if (cancelToken == null || !cancelToken.isCancelled) {
+        //   subscription.resume();
+        // }
+      }).catchError((err) async {
+        try {
+          await subscription.cancel();
+        } finally {
+          completer.completeError(DioError(
+            requestOptions: resp.requestOptions,
+            error: err,
+          ));
+        }
+      });
+    }
+
+    var writeTime = 0;
+    var bucketLength = 0;
+    Future<void> _writeToFile(List<int> data) async {
+      if (speed > 0) {
+        var offset = 0;
+        while (offset < data.length) {
+          if (cancelToken != null && cancelToken.isCancelled) {
+            break;
+          }
+          int? end = offset + (speed - bucketLength);
+          if (end > data.length) end = null;
+          var writeData = data.sublist(offset, end);
+          bucketLength += writeData.length;
+          offset += writeData.length;
+          if (writeTime == 0) {
+            writeTime = DateTime.now().millisecondsSinceEpoch;
+          }
+          await _write(writeData);
+          final now = DateTime.now().millisecondsSinceEpoch;
+
+          if (bucketLength >= speed) {
+            if (now - writeTime < 1000) {
+              await Future.delayed(
+                  Duration(milliseconds: 1000 - (now - writeTime)));
+            }
+            writeTime = DateTime.now().millisecondsSinceEpoch;
+            bucketLength = 0;
+          }
+        }
+      } else {
+        await _write(data);
+      }
+      // asyncWrite = raf.writeFrom(data).then((_raf) {
+      //   // Notify progress
+      //   received += data.length;
+
+      //   onProgress?.call(received, total);
+
+      //   raf = _raf;
+      //   if (cancelToken == null || !cancelToken.isCancelled) {
+      //     subscription.resume();
+      //   }
+      // }).catchError((err) async {
+      //   try {
+      //     await subscription.cancel();
+      //   } finally {
+      //     completer.completeError(DioError(
+      //       requestOptions: resp.requestOptions,
+      //       error: err,
+      //     ));
+      //   }
+      // });
+    }
+
     subscription = stream.listen(
-      (data) {
+      (data) async {
         subscription.pause();
-        // Write file asynchronously
-        asyncWrite = raf.writeFrom(data).then((_raf) {
-          // Notify progress
-          received += data.length;
-
-          onProgress?.call(received, total);
-
-          raf = _raf;
+        asyncWrite = _writeToFile(data).then((value) {
           if (cancelToken == null || !cancelToken.isCancelled) {
             subscription.resume();
           }
-        }).catchError((err) async {
-          try {
-            await subscription.cancel();
-          } finally {
-            completer.completeError(DioError(
-              requestOptions: resp.requestOptions,
-              error: err,
-            ));
-          }
         });
+        // Write file asynchronously
+        // asyncWrite = raf.writeFrom(data).then((_raf) {
+        //   // Notify progress
+        //   received += data.length;
+
+        //   onProgress?.call(received, total);
+
+        //   raf = _raf;
+        //   if (cancelToken == null || !cancelToken.isCancelled) {
+        //     subscription.resume();
+        //   }
+        // }).catchError((err) async {
+        //   try {
+        //     await subscription.cancel();
+        //   } finally {
+        //     completer.completeError(DioError(
+        //       requestOptions: resp.requestOptions,
+        //       error: err,
+        //     ));
+        //   }
+        // });
       },
       onDone: () async {
         try {
           await asyncWrite;
           closed = true;
+          await raf.flush();
           await raf.close();
           completer.complete(resp);
         } catch (err) {
@@ -470,6 +569,7 @@ class WdDio with DioMixin implements Dio {
     int length, {
     void Function(int count, int total)? onProgress,
     CancelToken? cancelToken,
+    int append = 0,
   }) async {
     // fix auth error
     var pResp = await this.wdOptions(self, path, cancelToken: cancelToken);
@@ -485,14 +585,21 @@ class WdDio with DioMixin implements Dio {
       'PUT',
       path,
       data: data,
-      optionsHandler: (options) => options.headers?['content-length'] = length,
+      optionsHandler: (options) {
+        options.headers?['content-length'] = length - append;
+        if (append > 0) {
+          options.headers?['content-range'] =
+              "bytes $append-${length - 1}/$length";
+        }
+      },
       onSendProgress: onProgress,
       cancelToken: cancelToken,
     );
     var status = resp.statusCode;
-    if (status == 200 || status == 201 || status == 204) {
+    if (status == 200 || status == 201 || status == 204 || status == 206) {
       return;
     }
+
     throw newResponseError(resp);
   }
 }

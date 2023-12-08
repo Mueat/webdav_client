@@ -171,14 +171,14 @@ class Client {
     String savePath, {
     void Function(int count, int total)? onProgress,
     CancelToken? cancelToken,
+    int speed = 0,
+    bool append = false,
   }) async {
-    await this.c.wdReadWithStream(
-          this,
-          path,
-          savePath,
-          onProgress: onProgress,
-          cancelToken: cancelToken,
-        );
+    await this.c.wdReadWithStream(this, path, savePath,
+        onProgress: onProgress,
+        cancelToken: cancelToken,
+        speed: speed,
+        append: append);
   }
 
   /// Write the bytes to remote path
